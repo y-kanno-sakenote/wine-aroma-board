@@ -1,0 +1,839 @@
+<!doctype html>
+<!--
+  言葉のボード（試作）。テーマ（タイトル・呼びかけ・言葉）は sets.js 側に持つ。
+  - #phone（既定）= 参加者画面（スマホ縦・PC横の両方） / #screen = 画面共有用スクリーン（16:9・1920×1080想定）
+  - ?set=<セット名> で言葉のセットを選ぶ（省略時は wine）。?b=<boardId> でボードを分ける（省略時は main）。
+    本番とリハーサルは b を変えるだけで別ボードになる。
+  - アプリは正解を言わない。人が選んだ言葉を並べて、近い人を見つけるだけ。
+
+  同期について：
+  下の FIREBASE_CONFIG が null の間は LocalStore（BroadcastChannel＋localStorage、同一ブラウザのタブ間のみ）。
+  値を入れると FirebaseStore（Realtime Database）に切り替わる。各参加者は匿名認証の uid で
+  /boards/<boardId>/people/<uid> = {emoji, words:{<語>:true}, t: serverTimestamp} を書き、
+  onValue('/boards/<boardId>/people') で全員を購読。接続が切れても消さない（講座中に画面を閉じた人・スマホをロックした人も残す）。
+  Firebase 側の準備：Authentication で「匿名」を有効化／Realtime Database を作成し、同じフォルダの
+  database.rules.json をルールとして適用する。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a0b10">
+<title>言葉のボード</title>
+<style>
+  :root {
+    --bg-deep: #120a0d;
+    --bg-wine: #2a0f17;
+    --ink: #efe6d2;          /* 生成り */
+    --ink-dim: rgba(239, 230, 210, 0.66);
+    --ink-faint: rgba(239, 230, 210, 0.34);
+    --line: rgba(239, 230, 210, 0.22);
+    --chip-bg: rgba(239, 230, 210, 0.05);
+    --chip-on: #7a2335;
+    --chip-on-line: #b4475a;
+    --serif: "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif JP", serif;
+    --sans: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+    --emoji: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg-deep);
+    background-image: radial-gradient(ellipse at 50% 0%, var(--bg-wine) 0%, var(--bg-deep) 70%);
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  [hidden] { display: none !important; }
+
+  /* ---------- 参加者画面（スマホ縦・PC横） ---------- */
+  #phone { max-width: 1040px; margin: 0 auto; padding: 0 16px calc(96px + env(safe-area-inset-bottom)); }
+  .ph-head { padding: calc(20px + env(safe-area-inset-top)) 0 8px; text-align: center; }
+  .ph-me { font-family: var(--serif); font-size: 20px; letter-spacing: .06em; color: var(--ink-dim); }
+  .ph-me .em { font-family: var(--emoji); font-size: 44px; vertical-align: middle; margin-left: 6px; }
+  .ph-hint { margin: 6px 0 0; font-size: 14px; color: var(--ink-faint); }
+  .ph-status { margin: 10px 0 0; font-size: 13px; color: var(--ink-faint); }
+  .cat { margin-top: 18px; }
+  .cat h2 { margin: 0 0 8px; font-size: 12px; font-weight: 500; letter-spacing: .14em; color: var(--ink-faint); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    appearance: none; font: inherit; font-size: 16px; line-height: 1.2;
+    min-height: 44px; padding: 10px 16px; border-radius: 999px;
+    color: var(--ink); background: var(--chip-bg); border: 1px solid var(--line);
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: background-color .15s, border-color .15s;
+  }
+  .chip:hover { border-color: var(--ink-faint); }
+  .chip[aria-pressed="true"] { background: var(--chip-on); border-color: var(--chip-on-line); color: #fff6e6; }
+  .chip:focus-visible { outline: 2px solid var(--ink-dim); outline-offset: 2px; }
+  .ph-near {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(18, 10, 13, 0.97) 70%, rgba(18, 10, 13, 0));
+    text-align: center; font-size: 15px; color: var(--ink-dim);
+  }
+  .ph-near .em { font-family: var(--emoji); font-size: 26px; margin: 0 3px; vertical-align: middle; color: var(--ink); }
+  @media (min-width: 760px) {
+    .ph-head { padding-top: 36px; }
+    .ph-me { font-size: 22px; }
+    .ph-me .em { font-size: 52px; }
+    .ph-hint { font-size: 15px; }
+    #cats { display: grid; grid-template-columns: 1fr 1fr; column-gap: 40px; }
+    .cat { margin-top: 26px; }
+    .cat h2 { font-size: 13px; }
+    .chip { font-size: 17px; }
+    .ph-near { font-size: 17px; }
+    .ph-near .em { font-size: 30px; }
+  }
+
+  /* ---------- スクリーン画面（画面共有 16:9） ---------- */
+  #screen { position: fixed; inset: 0; overflow: hidden; }
+  #board { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .sc-title { position: absolute; top: 3vh; left: 2.4vw; font-family: var(--serif); font-size: clamp(20px, 2.1vw, 40px); letter-spacing: .12em; color: var(--ink-dim); pointer-events: none; }
+  .sc-gauge { position: absolute; top: calc(3vh + clamp(20px, 2.1vw, 40px) * 1.6); left: 2.4vw; font-family: var(--serif); font-size: clamp(18px, 1.6vw, 30px); letter-spacing: .1em; color: var(--ink); opacity: 0; transition: opacity .5s; pointer-events: none; }
+  .sc-gauge.on { opacity: .9; }
+  .sc-empty { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--serif); font-size: clamp(20px, 2.2vw, 42px); color: var(--ink-faint); letter-spacing: .08em; pointer-events: none; }
+  .sc-join { position: absolute; right: 2vw; bottom: 3vh; display: flex; align-items: flex-end; gap: 1.2vw; color: var(--ink-dim); }
+  .sc-join .txt { text-align: right; font-size: clamp(14px, 1.15vw, 22px); line-height: 1.45; }
+  .sc-join .url { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: clamp(15px, 1.25vw, 24px); color: var(--ink); word-break: break-all; max-width: 30vw; display: inline-block; }
+  .sc-qr { width: clamp(110px, 9.5vw, 190px); aspect-ratio: 1; border-radius: 8px; background: #efe6d2; padding: clamp(6px, .5vw, 10px); display: grid; place-items: center; }
+  .sc-qr img, .sc-qr canvas { width: 100% !important; height: 100% !important; display: block; image-rendering: pixelated; }
+  .sc-demo { position: absolute; left: 2vw; bottom: 3vh; display: flex; gap: 8px; opacity: .25; transition: opacity .2s; }
+  .sc-demo:hover, .sc-demo:focus-within { opacity: 1; }
+  .sc-demo button { font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 6px; color: var(--ink); background: transparent; border: 1px solid var(--line); cursor: pointer; }
+</style>
+</head>
+<body>
+
+<main id="phone" hidden>
+  <header class="ph-head">
+    <div class="ph-me">あなたは<span class="em" id="meEmoji">・</span></div>
+    <p class="ph-hint" id="phPrompt"></p>
+    <p class="ph-status" id="phStatus" hidden></p>
+  </header>
+  <div id="cats"></div>
+  <div class="ph-near" id="near" aria-live="polite">言葉を選ぶと、近い人が見えます</div>
+</main>
+
+<section id="screen" hidden>
+  <canvas id="board"></canvas>
+  <div class="sc-title" id="scTitle"></div>
+  <div class="sc-gauge" id="scGauge" aria-live="polite"></div>
+  <div class="sc-empty" id="scEmpty">言葉を選ぶと、近い人どうしが寄っていきます</div>
+  <div class="sc-join">
+    <div class="txt">参加はこちら<br><span class="url" id="joinUrl"></span></div>
+    <div class="sc-qr" id="qrSlot" hidden></div>
+  </div>
+  <div class="sc-demo">
+    <button type="button" id="demoAdd">デモ参加者を足す</button>
+    <button type="button" id="demoClear">デモを消す</button>
+  </div>
+</section>
+
+<script src="sets.js"></script>
+<script>
+"use strict";
+
+/* =========================================================
+   Firebase 設定。null のままなら同一ブラウザ内の LocalStore で動く。
+   本番は Firebase コンソールの「ウェブアプリの設定」をそのまま貼る：
+   { apiKey: "...", authDomain: "...", databaseURL: "https://<project>-default-rtdb.<region>.firebasedatabase.app", projectId: "...", appId: "..." }
+   ========================================================= */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDW89EnVh-bZjfIpnTidcGOX1NqnhQ9tp8",
+  authDomain: "wine-aroma-board.firebaseapp.com",
+  databaseURL: "https://wine-aroma-board-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "wine-aroma-board",
+  storageBucket: "wine-aroma-board.firebasestorage.app",
+  messagingSenderId: "971973027169",
+  appId: "1:971973027169:web:236a9f9128836464855120"
+};
+const FIREBASE_SDK = "https://www.gstatic.com/firebasejs/10.14.1/"; // compat 版・固定
+const QR_LIB = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
+
+/* =========================================================
+   言葉のセット（sets.js の window.BOARD_SETS から ?set= で選ぶ）
+   ========================================================= */
+const DEFAULT_AVATARS = ["🍇", "🍒", "🍓", "🫐", "🍋", "🍏", "🍐", "🧀", "🫒", "🌿", "🌸", "🔥", "🌰", "🍯", "🍫", "☕", "🌙", "⛰️", "🍑", "🌻", "🍄", "🪵", "🌊", "⭐", "🦉", "🐈", "🍂", "🌾"];
+const QS = new URLSearchParams(location.search);
+const SETS = window.BOARD_SETS || {};
+const SET_KEY = SETS[QS.get("set")] ? QS.get("set") : (SETS.wine ? "wine" : Object.keys(SETS)[0]);
+const SET = SETS[SET_KEY] || { title: "", prompt: "", groups: [] };
+const WORD_GROUPS = SET.groups || [];
+const ALL_WORDS = [...new Set(WORD_GROUPS.flatMap(g => g.words))];
+const AVATARS = (SET.avatars && SET.avatars.length) ? SET.avatars : DEFAULT_AVATARS;
+const MAX_WORDS = 20;              // 1人が持てる言葉の上限（database.rules.json の想定と合わせる）
+
+const STALE_MS = 6 * 60 * 60 * 1000;   // ボードは1回の講座ごとに分ける前提。6時間更新がなければ表示から外す（前回の講座の残りを拾わないため）
+const HEARTBEAT_MS = 60 * 1000;    // 参加者画面を開いている間の生存通知
+
+const BOARD_ID = (() => {
+  const b = QS.get("b") || "";
+  return /^[A-Za-z0-9_-]{1,40}$/.test(b) ? b : "main";
+})();
+
+/* ==PURE-BEGIN== 類似度・グループ検出・配置計算（DOMに触らない純関数。grouping.test.mjs が読む） */
+const GROUP_THRESHOLD = 0.25;      // この Jaccard 以上の2人を「近い」とみなす（10名規模向け。5語どうしで2語共有＝0.25）
+
+function jaccard(a, b) {
+  const A = a instanceof Set ? a : new Set(a);
+  const B = b instanceof Set ? b : new Set(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
+/* people: [{id, words:[...]}] → [{members:[id...], labels:[言葉, 言葉]}]（人数の多い順）
+   wordOrder: ラベルの同数タイ時の並び順（言葉の定義順）。 */
+function findGroups(people, threshold = GROUP_THRESHOLD, wordOrder = []) {
+  const list = people.filter(p => p.words && p.words.length > 0);
+  const n = list.length;
+  const parent = list.map((_, i) => i);
+  const find = i => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const sets = list.map(p => new Set(p.words));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (jaccard(sets[i], sets[j]) >= threshold) {
+        const ri = find(i), rj = find(j);
+        if (ri !== rj) parent[ri] = rj;
+      }
+    }
+  }
+  const comps = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!comps.has(r)) comps.set(r, []);
+    comps.get(r).push(i);
+  }
+  const groups = [];
+  for (const idx of comps.values()) {
+    if (idx.length < 2) continue;
+    groups.push({
+      members: idx.map(i => list[i].id),
+      labels: topSharedWords(idx.map(i => list[i].words), 2, wordOrder),
+    });
+  }
+  groups.sort((a, b) => b.members.length - a.members.length || (a.members[0] < b.members[0] ? -1 : 1));
+  return groups;
+}
+
+/* 何人に選ばれているかの多い順に上位 k 語。2人以上が選んだ言葉を優先する。 */
+function topSharedWords(wordLists, k = 2, wordOrder = []) {
+  const count = new Map();
+  for (const ws of wordLists) for (const w of new Set(ws)) count.set(w, (count.get(w) || 0) + 1);
+  const rank = w => { const i = wordOrder.indexOf(w); return i < 0 ? 1e9 : i; };
+  const sorted = [...count.entries()].sort((a, b) => b[1] - a[1] || rank(a[0]) - rank(b[0]) || (a[0] < b[0] ? -1 : 1));
+  const shared = sorted.filter(([, c]) => c >= 2);
+  return (shared.length ? shared : sorted).slice(0, k).map(([w]) => w);
+}
+
+/* 自分に近い人（Jaccard ≥ threshold）を近い順に最大 max 人 */
+function nearestPeople(meId, people, threshold = GROUP_THRESHOLD, max = 5) {
+  const me = people.find(p => p.id === meId);
+  if (!me || !me.words || me.words.length === 0) return [];
+  return people
+    .filter(p => p.id !== meId)
+    .map(p => ({ p, s: jaccard(me.words, p.words || []) }))
+    .filter(x => x.s >= threshold)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, max)
+    .map(x => x.p);
+}
+
+/* 力学シミュレーション1ステップ（nodes を書き換える）
+   nodes: [{x, y, vx, vy, active(言葉を選んでいるか)}]
+   sim(i, j): i番目と j番目の類似度（0..1）
+   opt: {W, H, r, threshold, t(フレーム数),
+         box(任意：丸の外周を収める枠 {left, top, right, bottom}。省略時は画面全体),
+         avoid(任意：丸を重ねない矩形の配列。QR・ボタンなど)} */
+function stepLayout(nodes, sim, opt) {
+  const { W, H, r } = opt;
+  if (!(W > 4 * r && H > 4 * r)) return;              // 画面サイズ未確定（裏タブ等）の間は動かさない
+  const threshold = opt.threshold ?? GROUP_THRESHOLD;
+  const box = opt.box;                                // 枠が小さすぎるとき（狭いウィンドウ）は画面全体に戻す
+  const useBox = !!box && box.right - box.left > 4 * r && box.bottom - box.top > 4 * r;
+  const bx0 = useBox ? box.left : 0, by0 = useBox ? box.top : 0, bx1 = useBox ? box.right : W, by1 = useBox ? box.bottom : H;
+  const cx = (bx0 + bx1) / 2, cy = (by0 + by1) / 2;   // 重力の中心＝安全領域の中心
+  const rx = useBox ? ((bx1 - bx0) / 2 - r) * 0.92 : W * 0.40;
+  const ry = useBox ? ((by1 - by0) / 2 - r) * 0.92 : H * 0.37;
+  const avoid = opt.avoid || [];
+  const n = nodes.length;
+  const fx = new Float64Array(n), fy = new Float64Array(n);
+  const rest = 2 * r + 12;
+  for (let i = 0; i < n; i++) {                       // 万一の NaN は外周に戻す
+    const a = nodes[i];
+    if (!Number.isFinite(a.x) || !Number.isFinite(a.y)) { a.x = cx + Math.cos(i) * rx; a.y = cy + Math.sin(i) * ry; a.vx = a.vy = 0; }
+  }
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < n; j++) {
+      const b = nodes[j];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let d = Math.hypot(dx, dy);
+      if (d < 0.01) { dx = Math.cos(i * 7 + j); dy = Math.sin(i * 7 + j); d = 1; }
+      const ux = dx / d, uy = dy / d;
+      let f = 1.6 * r * r / (d * d);                     // 全員に弱い反発
+      const minD = 2 * r + 10;
+      if (d < minD) f += (minD - d) * 0.3;                // 重なり防止
+      const both = a.active && b.active;
+      const s = both ? sim(i, j) : 0;
+      if (s > 0) f -= 0.006 * s * (d - rest);             // 類似度に比例した引力（ばね）
+      if (both && s < threshold) {                        // 遠い人どうしはゆるく離す（グループの間に余白）
+        f += 0.9 * (1 - s / threshold) * r / Math.max(d, r);
+      }
+      fx[i] -= ux * f; fy[i] -= uy * f;
+      fx[j] += ux * f; fy[j] += uy * f;
+    }
+  }
+  const t = opt.t || 0;
+  const minX = bx0 + r, maxX = bx1 - r, minY = by0 + r, maxY = by1 - r;
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    if (a.active) {
+      fx[i] += 0.0022 * (cx - a.x);                     // 中心への弱い重力（横長画面なので縦を強め）
+      fy[i] += 0.0040 * (cy - a.y);
+    } else {
+      const ang = Math.atan2((a.y - cy) / ry, (a.x - cx) / rx) + 0.0016; // 外周をゆっくり漂う
+      const wob = 1 + 0.03 * Math.sin(t * 0.01 + i);
+      fx[i] += 0.02 * (cx + rx * wob * Math.cos(ang) - a.x);
+      fy[i] += 0.02 * (cy + ry * wob * Math.sin(ang) - a.y);
+    }
+    a.vx = (a.vx + fx[i]) * 0.86;
+    a.vy = (a.vy + fy[i]) * 0.86;
+    const sp = Math.hypot(a.vx, a.vy), cap = 8;
+    if (sp > cap) { a.vx *= cap / sp; a.vy *= cap / sp; }
+    a.x = Math.min(maxX, Math.max(minX, a.x + a.vx));
+    a.y = Math.min(maxY, Math.max(minY, a.y + a.vy));
+    for (const o of avoid) {                            // QR・ボタンに重なったら、枠の内側で一番近い辺へ押し出す
+      const L = o.left - r, R = o.right + r, T = o.top - r, B = o.bottom + r;
+      if (!(a.x > L && a.x < R && a.y > T && a.y < B)) continue;
+      const outs = [[L, a.y, a.x - L, "x"], [R, a.y, R - a.x, "x"], [a.x, T, a.y - T, "y"], [a.x, B, B - a.y, "y"]]
+        .filter(([x, y]) => x >= minX && x <= maxX && y >= minY && y <= maxY);
+      if (!outs.length) continue;
+      const best = outs.reduce((p, q) => (q[2] < p[2] ? q : p));
+      a.x = best[0]; a.y = best[1];
+      if (best[3] === "x") a.vx = 0; else a.vy = 0;
+    }
+  }
+}
+/* ==PURE-END== */
+
+/* 受け取った言葉の掃除：定義にない語・重複を捨て、上限で切る（DBに変な値が入っても画面を守る） */
+function cleanWords(words) {
+  return [...new Set(words || [])].filter(w => ALL_WORDS.includes(w)).slice(0, MAX_WORDS);
+}
+
+/* =========================================================
+   Store：同期の口。LocalStore / FirebaseStore は同じ4メソッドを持つ。
+     join()                 → Promise<id>   （自分を参加者として登録。絵文字は Store が割り当てる）
+     setWords(id, words[])  → Promise
+     subscribe(cb(people))  → 解除関数     people = [{id, emoji, words, t}]
+     leave(id)              → Promise
+   ========================================================= */
+class LocalStore {
+  constructor(boardId) {
+    this.prefix = `aroma-board:${boardId}:p:`;
+    this.pidKey = `aroma-board:${boardId}:pid`;
+    this.listeners = new Set();
+    this.bc = ("BroadcastChannel" in window) ? new BroadcastChannel(`aroma-board:${boardId}`) : null;
+    if (this.bc) this.bc.onmessage = () => this._emit();
+    window.addEventListener("storage", e => { if (!e.key || e.key.startsWith(this.prefix)) this._emit(); });
+    setInterval(() => this._emit(), 20 * 1000); // 古い参加者を定期的に外す
+  }
+  _read(id) { try { return JSON.parse(localStorage.getItem(this.prefix + id)); } catch { return null; } }
+  _write(id, rec) { try { localStorage.setItem(this.prefix + id, JSON.stringify(rec)); } catch {} this._notify(); }
+  _notify() { if (this.bc) this.bc.postMessage("changed"); this._emit(); }
+  _all() {
+    const now = Date.now(), out = [], keys = [];
+    try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch { return out; }
+    for (const k of keys) {
+      if (!k || !k.startsWith(this.prefix)) continue;
+      const id = k.slice(this.prefix.length);
+      const rec = this._read(id);
+      if (!rec || now - (rec.t || 0) > STALE_MS) { try { localStorage.removeItem(k); } catch {} continue; }
+      out.push({ id, emoji: rec.emoji, words: cleanWords(rec.words), t: rec.t });
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : 1));
+  }
+  _emit() { const people = this._all(); for (const cb of this.listeners) cb(people); }
+  async join() {
+    let id = null;
+    try { id = sessionStorage.getItem(this.pidKey); } catch {}
+    if (!id) { id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); try { sessionStorage.setItem(this.pidKey, id); } catch {} }
+    const prev = this._read(id);
+    this._write(id, { emoji: prev?.emoji || pickEmoji(this._all().map(p => p.emoji)), words: prev?.words || [], t: Date.now() });
+    return id;
+  }
+  async setWords(id, words) {
+    const prev = this._read(id);
+    if (!prev) return;
+    this._write(id, { ...prev, words: cleanWords(words), t: Date.now() });
+  }
+  subscribe(cb) { this.listeners.add(cb); cb(this._all()); return () => this.listeners.delete(cb); }
+  async leave(id) { try { localStorage.removeItem(this.prefix + id); } catch {} this._notify(); }
+}
+
+class FirebaseStore {
+  constructor(boardId, config) { this.boardId = boardId; this.config = config; this.me = null; this.last = null; this.offset = 0; this.listeners = new Set(); }
+  async init() {
+    for (const f of ["firebase-app-compat.js", "firebase-auth-compat.js", "firebase-database-compat.js"]) await loadScript(FIREBASE_SDK + f);
+    const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(this.config);
+    // 保存済みのログイン状態が復元されるのを待ってから使う（先に signIn すると別IDで書いて弾かれる）
+    const auth = app.auth();
+    let user = await new Promise(res => { const off = auth.onAuthStateChanged(u => { off(); res(u); }); });
+    if (!user) user = (await auth.signInAnonymously()).user;
+    await user.getIdToken();
+    this.uid = user.uid;
+    this.db = app.database();
+    this.ref = this.db.ref(`boards/${this.boardId}/people`);
+    this.db.ref(".info/serverTimeOffset").on("value", s => { this.offset = s.val() || 0; });
+    // 再接続（スマホのスリープ復帰など）のたびに自分のノードを書き直す
+    this.db.ref(".info/connected").on("value", s => { if (s.val() === true && this.me) this._writeMe(); });
+    this.ref.on("value", snap => { this.last = snap.val() || {}; this._emit(); },
+      err => console.error("ボードを読めません（Realtime Database のルール未設定の可能性）", err));
+    setInterval(() => this._emit(), 20 * 1000);
+    return this;
+  }
+  _list() {
+    const now = Date.now() + this.offset, out = [];
+    for (const [id, rec] of Object.entries(this.last || {})) {
+      if (!rec || typeof rec !== "object" || now - (rec.t || 0) > STALE_MS) continue;
+      out.push({ id, emoji: String(rec.emoji || "・").slice(0, 8), words: cleanWords(Object.keys(rec.words || {})), t: rec.t });
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : 1));
+  }
+  _emit() { if (this.last == null) return; const people = this._list(); for (const cb of this.listeners) cb(people); }
+  _wordsObj(words) { const o = {}; for (const w of cleanWords(words)) o[w] = true; return Object.keys(o).length ? o : null; }
+  async _writeMe() {
+    const node = this.ref.child(this.me.id);
+    await node.set({ emoji: this.me.emoji, words: this._wordsObj(this.me.words), t: firebase.database.ServerValue.TIMESTAMP });
+  }
+  async join() {
+    const id = this.uid;
+    const emojiKey = `aroma-board:${this.boardId}:emoji:${id}`;
+    const snap = await this.ref.get();
+    const all = snap.val() || {};
+    let emoji = all[id]?.emoji;
+    try { emoji = emoji || sessionStorage.getItem(emojiKey); } catch {}
+    emoji = emoji || pickEmoji(Object.values(all).map(r => r && r.emoji));
+    try { sessionStorage.setItem(emojiKey, emoji); } catch {}
+    this.me = { id, emoji, words: Object.keys(all[id]?.words || {}) };
+    await this._writeMe();
+    return id;
+  }
+  async setWords(id, words) {
+    if (!this.me || id !== this.me.id) return;
+    this.me.words = cleanWords(words);
+    await this.ref.child(id).update({ words: this._wordsObj(this.me.words), t: firebase.database.ServerValue.TIMESTAMP });
+  }
+  subscribe(cb) { this.listeners.add(cb); if (this.last != null) cb(this._list()); return () => this.listeners.delete(cb); }
+  async leave(id) { if (this.me && id === this.me.id) { this.me = null; await this.ref.child(id).remove(); } }
+}
+
+function pickEmoji(usedList) {
+  const used = new Set(usedList);
+  const free = AVATARS.filter(e => !used.has(e));
+  const pool = free.length ? free : AVATARS;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true;
+    s.onload = () => resolve(); s.onerror = () => reject(new Error("読み込めませんでした: " + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function createStore() {
+  if (!FIREBASE_CONFIG) return new LocalStore(BOARD_ID);
+  return new FirebaseStore(BOARD_ID, FIREBASE_CONFIG).init();
+}
+
+/* =========================================================
+   参加者画面
+   ========================================================= */
+async function startPhone(store) {
+  document.getElementById("phone").hidden = false;
+  document.getElementById("phPrompt").textContent = SET.prompt || "";
+  const wordsKey = `aroma-board:${BOARD_ID}:mywords`;
+  let myWords = new Set();
+  try { myWords = new Set(cleanWords(JSON.parse(sessionStorage.getItem(wordsKey) || "[]"))); } catch {}
+  let myId;
+  try { myId = await store.join(); }
+  catch (e) {
+    console.error(e);
+    const st = document.getElementById("phStatus");
+    st.textContent = "つながりませんでした。少し待って再読み込みしてください。";
+    st.hidden = false;
+    return;
+  }
+  let restored = myWords.size > 0;
+  if (restored) store.setWords(myId, [...myWords]); // 再読み込み・再接続で消えた分を戻す
+
+  const cats = document.getElementById("cats");
+  const chipEls = new Map();
+  const save = () => { try { sessionStorage.setItem(wordsKey, JSON.stringify([...myWords])); } catch {} };
+  for (const c of WORD_GROUPS) {
+    const sec = document.createElement("section");
+    sec.className = "cat";
+    const h = document.createElement("h2"); h.textContent = c.label;
+    const box = document.createElement("div"); box.className = "chips";
+    sec.append(h, box);
+    for (const w of c.words) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "chip"; b.textContent = w;
+      b.setAttribute("aria-pressed", String(myWords.has(w)));
+      b.addEventListener("click", () => {
+        if (myWords.has(w)) myWords.delete(w);
+        else if (myWords.size < MAX_WORDS) myWords.add(w);
+        b.setAttribute("aria-pressed", String(myWords.has(w)));
+        save();
+        store.setWords(myId, [...myWords]);
+      });
+      chipEls.set(w, b);
+      box.appendChild(b);
+    }
+    cats.appendChild(sec);
+  }
+
+  const meEl = document.getElementById("meEmoji");
+  const nearEl = document.getElementById("near");
+  store.subscribe(people => {
+    const me = people.find(p => p.id === myId);
+    if (me) {
+      meEl.textContent = me.emoji;
+      if (!restored) { // 同じタブで別経路から入っていた言葉を戻す
+        restored = true;
+        myWords = new Set(me.words);
+        for (const [w, b] of chipEls) b.setAttribute("aria-pressed", String(myWords.has(w)));
+        save();
+      }
+    }
+    if (myWords.size === 0) { nearEl.textContent = "言葉を選ぶと、近い人が見えます"; return; }
+    const self = { id: myId, words: [...myWords] };
+    const near = nearestPeople(myId, [self, ...people.filter(p => p.id !== myId)]);
+    nearEl.textContent = "";
+    nearEl.append(near.length ? "近い人" : "近い人は、まだ");
+    for (const p of near) {
+      const s = document.createElement("span");
+      s.className = "em"; s.textContent = p.emoji;
+      nearEl.append(s);
+    }
+  });
+
+  setInterval(() => { if (document.visibilityState === "visible") store.setWords(myId, [...myWords]); }, HEARTBEAT_MS);
+}
+
+/* =========================================================
+   スクリーン画面
+   ========================================================= */
+// グループの色面。先頭の4色（赤ワイン・白ワイン・葡萄の葉・葡萄）は色相を離して、10名規模で見分けがつくように
+const GROUP_COLORS = ["#a8324a", "#c9a646", "#6f8a4a", "#7b4a8c", "#b8783a", "#d08a96", "#5a6f96", "#8a5a3c"];
+
+function startScreen(store) {
+  document.getElementById("screen").hidden = false;
+  document.getElementById("scTitle").textContent = SET.title || "";
+  // 参加用URL：同じ set と b を引き継ぐ（URLにあるものだけ。短く保つ）
+  const u = new URL(location.href);
+  const q = new URLSearchParams();
+  if (QS.has("set")) q.set("set", SET_KEY);
+  if (QS.has("b")) q.set("b", BOARD_ID);
+  u.search = q.toString() ? "?" + q.toString() : "";
+  u.hash = "phone";
+  const joinUrl = u.toString();
+  document.getElementById("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
+  showQr(joinUrl);
+
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+  const emptyEl = document.getElementById("scEmpty");
+  const titleEl = document.getElementById("scTitle");
+  const joinEl = document.querySelector(".sc-join");
+  const demoEl = document.querySelector(".sc-demo");
+  const emojiFont = getComputedStyle(document.documentElement).getPropertyValue("--emoji").trim();
+  let W = 0, H = 0, R = 60;
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    R = Math.max(28, Math.min(90, Math.min(W / 1.78, H) / 14)); // 1920×1080 で約77px（10名規模で遠目にも読める大きさ）
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  const nodes = new Map();      // id -> {id, emoji, words(Set), x, y, vx, vy, active, born}
+  let order = [], simM = [];
+  let groups = [];              // {key, members:Set, labels, color, alpha, lkey, lx, ly, la}
+  let groupSeq = 0;
+  let remote = [];              // Store から来た参加者
+  const demo = new Map();       // スクリーンのローカルだけにいるデモ参加者 id -> {id, emoji, words}
+
+  // 「近さのものさし」：講師がキーで切り替える（↓ / - でゆるめる、↑ / + できびしく）。スクリーンの表示だけに効く
+  const RULERS = [
+    { v: 0.34, label: "きびしめ" },
+    { v: GROUP_THRESHOLD, label: "ふつう" },
+    { v: 0.20, label: "ゆるめ" },
+    { v: 0.15, label: "かなりゆるめ" },
+    { v: 0.10, label: "とてもゆるい" },
+  ];
+  let rulerIdx = 1;
+  let threshold = RULERS[rulerIdx].v;
+  const gaugeEl = document.getElementById("scGauge");
+  let gaugeTimer = 0;
+  window.addEventListener("keydown", e => {
+    if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+    let d = 0;
+    if (e.key === "ArrowDown" || e.key === "-") d = 1;
+    else if (e.key === "ArrowUp" || e.key === "+" || e.key === "=") d = -1;
+    if (!d) return;
+    e.preventDefault();
+    rulerIdx = Math.max(0, Math.min(RULERS.length - 1, rulerIdx + d));
+    threshold = RULERS[rulerIdx].v;
+    gaugeEl.textContent = "近さのものさし：" + RULERS[rulerIdx].label;
+    gaugeEl.classList.add("on");
+    clearTimeout(gaugeTimer);
+    gaugeTimer = setTimeout(() => gaugeEl.classList.remove("on"), 2600);
+    applyPeople();
+  });
+
+  function applyPeople() {
+    const people = [...remote, ...demo.values()];
+    const seen = new Set();
+    for (const p of people) {
+      seen.add(p.id);
+      let n = nodes.get(p.id);
+      if (!n) {
+        const ang = Math.random() * Math.PI * 2;
+        n = { id: p.id, x: W / 2 + Math.cos(ang) * W * 0.40, y: H / 2 + Math.sin(ang) * H * 0.37, vx: 0, vy: 0, born: performance.now() };
+        nodes.set(p.id, n);
+      }
+      n.emoji = p.emoji;
+      n.words = new Set(p.words);
+      n.active = n.words.size > 0;
+    }
+    for (const id of [...nodes.keys()]) if (!seen.has(id)) nodes.delete(id);
+
+    order = [...nodes.values()];
+    simM = order.map(a => order.map(b => (a === b ? 0 : jaccard(a.words, b.words))));
+    const found = findGroups(order.map(n => ({ id: n.id, words: [...n.words] })), threshold, ALL_WORDS);
+    // 前回のグループと人の重なりで対応づけ、色と位置を引き継ぐ（色のちらつき防止）
+    const taken = new Set(), next = [];
+    for (const g of found) {
+      const mem = new Set(g.members);
+      let best = null, bestOv = 0;
+      for (const pg of groups) {
+        if (taken.has(pg.key)) continue;
+        let ov = 0; for (const id of mem) if (pg.members.has(id)) ov++;
+        if (ov > bestOv) { bestOv = ov; best = pg; }
+      }
+      if (best) { taken.add(best.key); next.push({ ...best, members: mem, labels: g.labels }); }
+      else {
+        const used = new Map(); for (const x of next) used.set(x.color, (used.get(x.color) || 0) + 1);
+        const color = GROUP_COLORS.slice().sort((a, b) => (used.get(a) || 0) - (used.get(b) || 0))[0];
+        next.push({ key: ++groupSeq, members: mem, labels: g.labels, color, alpha: 0, lkey: null, lx: 0, ly: 0, la: 0 });
+      }
+    }
+    groups = next;
+    emptyEl.hidden = nodes.size > 0;
+  }
+
+  store.subscribe(people => { remote = people; applyPeople(); });
+
+  // 画面上の固定物（タイトル・参加案内・デモボタン）の矩形
+  const rectOf = el => { const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0 ? b : null; };
+  const pad = (b, p) => ({ left: b.left - p, top: b.top - p, right: b.right + p, bottom: b.bottom + p });
+
+  // グループの色面：メンバーの丸を少し大きくした円と、近いメンバーどうしをつなぐ帯の「和」を1回で塗る
+  // （1つのパスに同じ向きで足すので、重なっても濃さは均一）
+  function blob(ms, extra, color, alpha) {
+    const rr = R + extra, hw = rr * 0.75;
+    const reach = R * 3.2;   // 間に別の人が入れない距離（丸2つ分＋隙間）だけつなぐ。他人を色面に巻き込まない
+    ctx.beginPath();
+    for (const n of ms) { ctx.moveTo(n.x + rr, n.y); ctx.arc(n.x, n.y, rr, 0, Math.PI * 2); }
+    for (let i = 0; i < ms.length; i++) for (let j = i + 1; j < ms.length; j++) {
+      const a = ms[i], b = ms[j], d = Math.hypot(b.x - a.x, b.y - a.y);
+      if (d < 1 || d > reach) continue;
+      const nx = -(b.y - a.y) / d * hw, ny = (b.x - a.x) / d * hw;
+      ctx.moveTo(a.x - nx, a.y - ny); ctx.lineTo(b.x - nx, b.y - ny); ctx.lineTo(b.x + nx, b.y + ny); ctx.lineTo(a.x + nx, a.y + ny); ctx.closePath();
+    }
+    ctx.fillStyle = hexA(color, alpha);
+    ctx.fill();
+  }
+  const overlap = (a, b) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+
+  let frame = 0;
+  function draw() {
+    requestAnimationFrame(draw);   // 先に次フレームを予約（1フレームの例外でアニメが止まらないように）
+    frame++;
+    if (W < 10 || H < 10) return;
+    // 安全領域：上はタイトルの下（ラベル1行分あける）、右下の参加案内と左下のデモボタンには丸を重ねない
+    const tRect = rectOf(titleEl), jRect = rectOf(joinEl), dRect = rectOf(demoEl);
+    const fixed = [tRect, jRect, dRect].filter(Boolean);
+    const box = { left: W * 0.025, top: (tRect ? tRect.bottom : 0) + R * 0.75, right: W * 0.975, bottom: H * 0.975 };
+    const avoid = [jRect, dRect].filter(Boolean).map(b => pad(b, R * 0.25));
+    stepLayout(order, (i, j) => simM[i][j], { W, H, r: R, t: frame, box, avoid, threshold });
+    ctx.clearRect(0, 0, W, H);
+
+    // グループの色面（外側に薄い縁を重ねて柔らかく）
+    const byId = new Map(order.map(n => [n.id, n]));
+    const groupOf = new Map();
+    const drawn = [];
+    for (const g of groups) {
+      const ms = [...g.members].map(id => byId.get(id)).filter(Boolean);
+      if (ms.length < 2) continue;
+      for (const n of ms) groupOf.set(n.id, g);
+      g.alpha = Math.min(1, (g.alpha || 0) + 0.03);
+      blob(ms, R * 0.7, g.color, 0.14 * g.alpha);
+      blob(ms, R * 0.42, g.color, 0.32 * g.alpha);
+      drawn.push([g, ms]);
+    }
+
+    // 参加者の丸
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `${Math.round(R * 1.15)}px ${emojiFont}`;
+    const now = performance.now();
+    for (const n of order) {
+      const a = Math.min(1, (now - n.born) / 600);
+      ctx.globalAlpha = a * (n.active ? 1 : 0.5);
+      ctx.fillStyle = "rgba(30, 14, 19, 0.92)";
+      ctx.strokeStyle = n.active ? "rgba(239, 230, 210, 0.45)" : "rgba(239, 230, 210, 0.18)";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(n.x, n.y, R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#efe6d2";
+      ctx.fillText(n.emoji || "・", n.x, n.y + R * 0.06);
+    }
+    ctx.globalAlpha = 1;
+
+    // ラベル：2人以上のグループだけ。塊の上か下に寄り添わせ、丸・他のラベル・画面の固定物と重ねない
+    const fs = Math.round(R * 0.6);
+    ctx.font = `600 ${fs}px "Hiragino Mincho ProN", "Yu Mincho", serif`;
+    const placed = [];
+    for (const [g, ms] of drawn) {
+      if (!g.labels.length) continue;
+      const text = g.labels.join("・");
+      const w = ctx.measureText(text).width + fs * 0.4, h = fs * 1.2;
+      const top = ms.reduce((p, n) => (n.y < p.y ? n : p)), bot = ms.reduce((p, n) => (n.y > p.y ? n : p));
+      const mx = ms.reduce((s, n) => s + n.x, 0) / ms.length;
+      const yA = top.y - R * 1.12 - h / 2, yB = bot.y + R * 1.12 + h / 2;
+      const cands = [["上", mx, yA], ["下", mx, yB], ["上端", top.x, yA], ["下端", bot.x, yB]].map(([k, x, y]) => {
+        x = Math.min(W - w / 2 - 8, Math.max(w / 2 + 8, x));
+        const rect = { left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2 };
+        let s = rect.top < 0 || rect.bottom > H ? w * h : 0;
+        for (const n of order) {
+          const p = g.members.has(n.id) ? 2 : (groupOf.has(n.id) ? R * 0.42 : 4); // 他グループの色面にも乗せない
+          s += overlap(rect, { left: n.x - R - p, right: n.x + R + p, top: n.y - R - p, bottom: n.y + R + p });
+        }
+        for (const o of [...placed, ...fixed]) s += 2 * overlap(rect, o);
+        return { k, x, y, rect, s };
+      });
+      const cur = cands.find(c => c.k === g.lkey);
+      let pick = cands.reduce((p, c) => (c.s < p.s ? c : p));
+      if (cur && (cur.s === 0 || cur.s <= pick.s * 2)) pick = cur;   // 少しの差では乗り換えない（ちらつき防止）
+      if (pick.k !== g.lkey) { g.lkey = pick.k; g.lx = pick.x; g.ly = pick.y; g.la = 0; }
+      else { g.lx += (pick.x - g.lx) * 0.35; g.ly += (pick.y - g.ly) * 0.35; }
+      g.la = Math.min(1, g.la + 0.05);
+      placed.push(pick.rect);
+      ctx.globalAlpha = g.alpha * g.la;
+      ctx.lineWidth = 7; ctx.strokeStyle = "rgba(18, 10, 13, 0.85)";
+      ctx.strokeText(text, g.lx, g.ly);
+      ctx.fillStyle = "#efe6d2";
+      ctx.fillText(text, g.lx, g.ly);
+    }
+    ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(draw);
+
+  setupDemo(demo, applyPeople, () => [...remote, ...demo.values()].map(p => p.emoji));
+}
+
+function hexA(hex, a) {
+  const v = parseInt(hex.slice(1), 16);
+  return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${a.toFixed(3)})`;
+}
+
+async function showQr(text) {
+  const slot = document.getElementById("qrSlot");
+  try {
+    await loadScript(QR_LIB);
+    new QRCode(slot, { text, width: 256, height: 256, colorDark: "#120a0d", colorLight: "#efe6d2", correctLevel: QRCode.CorrectLevel.M });
+    slot.hidden = false;
+  } catch { /* 読み込めなくても URL 表示だけで動く */ }
+}
+
+/* =========================================================
+   デモ参加者（リハーサル用）。スクリーンのローカル表示にだけ足し、Store/DB には書かない。
+   好みの傾向は sets.js の demo（言葉の組み合わせ）。無ければ全語から作る。
+   ========================================================= */
+function demoTendencies() {
+  if (SET.demo && SET.demo.length) return SET.demo.map(t => t.filter(w => ALL_WORDS.includes(w))).filter(t => t.length);
+  // 傾向の指定がないセット：全語を4つに散らした仮の傾向
+  const out = [[], [], [], []];
+  ALL_WORDS.forEach((w, i) => out[i % 4].push(w));
+  return out.filter(t => t.length);
+}
+
+function setupDemo(demo, onChange, usedEmojis) {
+  const state = new Map(); // id -> {tend, target}
+  let timer = null, seq = 0;
+  const TENDS = demoTendencies();
+  const pickWord = tend => { const pool = Math.random() < 0.85 ? tend : ALL_WORDS; return pool[Math.floor(Math.random() * pool.length)]; };
+  function tick() {
+    let changed = false;
+    for (const [id, p] of demo) {
+      const st = state.get(id);
+      if (!st || Math.random() > 0.4) continue;
+      const ws = new Set(p.words);
+      if (ws.size < st.target) ws.add(pickWord(st.tend));
+      else if (Math.random() < 0.3) { const arr = [...ws]; ws.delete(arr[Math.floor(Math.random() * arr.length)]); ws.add(pickWord(st.tend)); }
+      else continue;
+      p.words = [...ws]; changed = true;
+    }
+    if (changed) onChange();
+  }
+  const DEMO_MAX = 10;     // 本番の人数に合わせて頭打ち（何度押しても10人まで）
+  let pending = [];        // 入場待ちのタイマー
+  document.getElementById("demoAdd").addEventListener("click", () => {
+    const room = DEMO_MAX - demo.size - pending.length;
+    for (let i = 0; i < room; i++) {
+      const tm = setTimeout(() => {
+        pending = pending.filter(x => x !== tm);
+        const id = `demo-${++seq}`;
+        demo.set(id, { id, emoji: pickEmoji(usedEmojis()), words: [] });
+        state.set(id, { tend: TENDS[Math.floor(Math.random() * TENDS.length)], target: 3 + Math.floor(Math.random() * 4) });
+        onChange();
+      }, i * 1200);
+      pending.push(tm);
+    }
+    if (!timer) timer = setInterval(tick, 2500);
+  });
+  document.getElementById("demoClear").addEventListener("click", () => {
+    for (const tm of pending) clearTimeout(tm);
+    pending = [];
+    demo.clear(); state.clear();
+    onChange();
+  });
+}
+
+/* ---------- 起動・画面の切り替え ---------- */
+(async () => {
+  const isScreen = location.hash === "#screen";
+  if (SET.title) document.title = SET.title;
+  if (!ALL_WORDS.length) { console.error("sets.js の言葉のセットが読めません"); }
+  let store;
+  try { store = await createStore(); }
+  catch (e) {
+    console.error(e);
+    if (!isScreen) { document.getElementById("phone").hidden = false; const st = document.getElementById("phStatus"); st.textContent = "つながりませんでした。少し待って再読み込みしてください。"; st.hidden = false; }
+    return;
+  }
+  if (isScreen) startScreen(store); else startPhone(store);
+})();
+window.addEventListener("hashchange", () => location.reload());
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# 公開しないもの（検証・テスト・ルールの控え）
+qa_report.md
+verification/
+grouping.test.mjs
+database.rules.json
+.DS_Store
