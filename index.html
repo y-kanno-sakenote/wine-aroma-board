@@ -48,8 +48,25 @@
   [hidden] { display: none !important; }
 
   /* ---------- 参加者画面（スマホ縦・PC横） ---------- */
-  #phone { max-width: 1040px; margin: 0 auto; padding: 0 16px calc(96px + env(safe-area-inset-bottom)); }
-  .ph-head { padding: calc(20px + env(safe-area-inset-top)) 0 8px; text-align: center; }
+  #phone { --tabs-h: calc(52px + env(safe-area-inset-top)); max-width: 1040px; margin: 0 auto; padding: var(--tabs-h) 16px calc(96px + env(safe-area-inset-bottom)); }
+  /* 「選ぶ」「ボード」のタブ（ページ内で切り替え。ハッシュは #phone のまま） */
+  .ph-tabs {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 3;
+    height: var(--tabs-h); padding-top: env(safe-area-inset-top);
+    display: flex; justify-content: center;
+    background: rgba(18, 10, 13, 0.94); border-bottom: 1px solid var(--line);
+  }
+  .ph-tab {
+    appearance: none; font: inherit; font-size: 16px; letter-spacing: .14em;
+    flex: 1; max-width: 220px; height: 100%; padding: 0;
+    color: var(--ink-faint); background: transparent; border: 0; border-bottom: 2px solid transparent;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .ph-tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--chip-on-line); }
+  .ph-tab:focus-visible { outline: 2px solid var(--ink-dim); outline-offset: -4px; }
+  .ph-board { position: fixed; top: var(--tabs-h); left: 0; right: 0; bottom: env(safe-area-inset-bottom); }
+  .ph-board canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .ph-head { padding: 20px 0 8px; text-align: center; }
   .ph-me { font-family: var(--serif); font-size: 20px; letter-spacing: .06em; color: var(--ink-dim); }
   .ph-me .em { font-family: var(--emoji); font-size: 44px; vertical-align: middle; margin-left: 6px; }
   .ph-hint { margin: 6px 0 0; font-size: 14px; color: var(--ink-faint); }
@@ -107,13 +124,20 @@
 <body>
 
 <main id="phone" hidden>
-  <header class="ph-head">
-    <div class="ph-me">あなたは<span class="em" id="meEmoji">・</span></div>
-    <p class="ph-hint" id="phPrompt"></p>
-    <p class="ph-status" id="phStatus" hidden></p>
-  </header>
-  <div id="cats"></div>
-  <div class="ph-near" id="near" aria-live="polite">言葉を選ぶと、近い人が見えます</div>
+  <nav class="ph-tabs" id="phTabs" role="tablist" hidden>
+    <button type="button" class="ph-tab" role="tab" data-tab="pick" aria-selected="true">選ぶ</button>
+    <button type="button" class="ph-tab" role="tab" data-tab="board" aria-selected="false">ボード</button>
+  </nav>
+  <div id="phPick">
+    <header class="ph-head">
+      <div class="ph-me">あなたは<span class="em" id="meEmoji">・</span></div>
+      <p class="ph-hint" id="phPrompt"></p>
+      <p class="ph-status" id="phStatus" hidden></p>
+    </header>
+    <div id="cats"></div>
+    <div class="ph-near" id="near" aria-live="polite">言葉を選ぶと、近い人が見えます</div>
+  </div>
+  <div class="ph-board" id="phBoardPane" hidden><canvas id="phBoard"></canvas></div>
 </main>
 
 <section id="screen" hidden>
@@ -500,9 +524,27 @@ async function startPhone(store) {
     cats.appendChild(sec);
   }
 
+  // 「ボード」タブ：スクリーンと同じ描画を埋め込みで使う（購読は下の1つを分けて渡す）
+  const board = startScreen(store, { canvas: document.getElementById("phBoard"), myId });
+  const tabsEl = document.getElementById("phTabs");
+  const pickEl = document.getElementById("phPick");
+  const boardPane = document.getElementById("phBoardPane");
+  let pickY = 0;
+  tabsEl.hidden = false;
+  tabsEl.addEventListener("click", e => {
+    const t = e.target.closest("[role=tab]");
+    if (!t) return;
+    const toBoard = t.dataset.tab === "board";
+    if (toBoard === !boardPane.hidden) return;
+    for (const b of tabsEl.querySelectorAll("[role=tab]")) b.setAttribute("aria-selected", String(b === t));
+    if (toBoard) { pickY = window.scrollY; pickEl.hidden = true; boardPane.hidden = false; board.show(); }
+    else { board.hide(); boardPane.hidden = true; pickEl.hidden = false; window.scrollTo(0, pickY); }
+  });
+
   const meEl = document.getElementById("meEmoji");
   const nearEl = document.getElementById("near");
   store.subscribe(people => {
+    board.onPeople(people);
     const me = people.find(p => p.id === myId);
     if (me) {
       meEl.textContent = me.emoji;
@@ -534,31 +576,40 @@ async function startPhone(store) {
 // グループの色面。先頭の4色（赤ワイン・白ワイン・葡萄の葉・葡萄）は色相を離して、10名規模で見分けがつくように
 const GROUP_COLORS = ["#a8324a", "#c9a646", "#6f8a4a", "#7b4a8c", "#b8783a", "#d08a96", "#5a6f96", "#8a5a3c"];
 
-function startScreen(store) {
-  document.getElementById("screen").hidden = false;
-  document.getElementById("scTitle").textContent = SET.title || "";
-  // 参加用URL：同じ set と b を引き継ぐ（URLにあるものだけ。短く保つ）
-  const u = new URL(location.href);
-  const q = new URLSearchParams();
-  if (QS.has("set")) q.set("set", SET_KEY);
-  if (QS.has("b")) q.set("b", BOARD_ID);
-  u.search = q.toString() ? "?" + q.toString() : "";
-  u.hash = "phone";
-  const joinUrl = u.toString();
-  document.getElementById("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
-  showQr(joinUrl);
+/* embed = {canvas, myId}：参加者画面の「ボード」タブに埋め込む。
+   QR・デモ・タイトル・ものさしは出さず、購読もしない（呼び出し側が onPeople に渡す）。描画は show() の間だけ。 */
+function startScreen(store, embed = null) {
+  if (!embed) {
+    document.getElementById("screen").hidden = false;
+    document.getElementById("scTitle").textContent = SET.title || "";
+    // 参加用URL：同じ set と b を引き継ぐ（URLにあるものだけ。短く保つ）
+    const u = new URL(location.href);
+    const q = new URLSearchParams();
+    if (QS.has("set")) q.set("set", SET_KEY);
+    if (QS.has("b")) q.set("b", BOARD_ID);
+    u.search = q.toString() ? "?" + q.toString() : "";
+    u.hash = "phone";
+    const joinUrl = u.toString();
+    document.getElementById("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
+    showQr(joinUrl);
+  }
 
-  const canvas = document.getElementById("board");
+  const canvas = embed ? embed.canvas : document.getElementById("board");
   const ctx = canvas.getContext("2d");
-  const emptyEl = document.getElementById("scEmpty");
+  const emptyEl = embed ? null : document.getElementById("scEmpty");
   const titleEl = document.getElementById("scTitle");
   const joinEl = document.querySelector(".sc-join");
   const demoEl = document.querySelector(".sc-demo");
   const emojiFont = getComputedStyle(document.documentElement).getPropertyValue("--emoji").trim();
+  const sansFont = getComputedStyle(document.documentElement).getPropertyValue("--sans").trim();
   let W = 0, H = 0, R = 60;
   function resize() {
     const dpr = window.devicePixelRatio || 1;
-    W = window.innerWidth; H = window.innerHeight;
+    if (embed) {                   // 埋め込みはタブバーを除いた領域の大きさ。隠れている間は測らない
+      const b = canvas.parentElement.getBoundingClientRect();
+      if (b.width < 10 || b.height < 10) return;
+      W = b.width; H = b.height;
+    } else { W = window.innerWidth; H = window.innerHeight; }
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     R = Math.max(28, Math.min(90, Math.min(W / 1.78, H) / 14)); // 1920×1080 で約77px（10名規模で遠目にも読める大きさ）
@@ -585,7 +636,7 @@ function startScreen(store) {
   let threshold = RULERS[rulerIdx].v;
   const gaugeEl = document.getElementById("scGauge");
   let gaugeTimer = 0;
-  window.addEventListener("keydown", e => {
+  if (!embed) window.addEventListener("keydown", e => {
     if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
     let d = 0;
     if (e.key === "ArrowDown" || e.key === "-") d = 1;
@@ -609,7 +660,8 @@ function startScreen(store) {
       let n = nodes.get(p.id);
       if (!n) {
         const ang = Math.random() * Math.PI * 2;
-        n = { id: p.id, x: W / 2 + Math.cos(ang) * W * 0.40, y: H / 2 + Math.sin(ang) * H * 0.37, vx: 0, vy: 0, born: performance.now() };
+        const w0 = W || window.innerWidth, h0 = H || window.innerHeight; // 埋め込みでまだ測っていない間は窓の大きさで代用
+        n = { id: p.id, x: w0 / 2 + Math.cos(ang) * w0 * 0.40, y: h0 / 2 + Math.sin(ang) * h0 * 0.37, vx: 0, vy: 0, born: performance.now() };
         nodes.set(p.id, n);
       }
       n.emoji = p.emoji;
@@ -639,10 +691,11 @@ function startScreen(store) {
       }
     }
     groups = next;
-    emptyEl.hidden = nodes.size > 0;
+    if (emptyEl) emptyEl.hidden = nodes.size > 0;
   }
 
-  store.subscribe(people => { remote = people; applyPeople(); });
+  const onPeople = people => { remote = people; applyPeople(); };
+  if (!embed) store.subscribe(onPeople);
 
   // 画面上の固定物（タイトル・参加案内・デモボタン）の矩形
   const rectOf = el => { const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0 ? b : null; };
@@ -666,15 +719,17 @@ function startScreen(store) {
   }
   const overlap = (a, b) => Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
 
-  let frame = 0;
+  let frame = 0, running = !embed, raf = 0;
   function draw() {
-    requestAnimationFrame(draw);   // 先に次フレームを予約（1フレームの例外でアニメが止まらないように）
+    if (!running) return;
+    raf = requestAnimationFrame(draw);   // 先に次フレームを予約（1フレームの例外でアニメが止まらないように）
     frame++;
     if (W < 10 || H < 10) return;
     // 安全領域：上はタイトルの下（ラベル1行分あける）、右下の参加案内と左下のデモボタンには丸を重ねない
-    const tRect = rectOf(titleEl), jRect = rectOf(joinEl), dRect = rectOf(demoEl);
+    // 埋め込みはそれらが無いので外し、下は「あなた」の1行分あける
+    const tRect = embed ? null : rectOf(titleEl), jRect = embed ? null : rectOf(joinEl), dRect = embed ? null : rectOf(demoEl);
     const fixed = [tRect, jRect, dRect].filter(Boolean);
-    const box = { left: W * 0.025, top: (tRect ? tRect.bottom : 0) + R * 0.75, right: W * 0.975, bottom: H * 0.975 };
+    const box = { left: W * 0.025, top: (tRect ? tRect.bottom : 0) + R * 0.75, right: W * 0.975, bottom: embed ? H - R * 0.75 : H * 0.975 };
     const avoid = [jRect, dRect].filter(Boolean).map(b => pad(b, R * 0.25));
     stepLayout(order, (i, j) => simM[i][j], { W, H, r: R, t: frame, box, avoid, threshold });
     ctx.clearRect(0, 0, W, H);
@@ -708,6 +763,16 @@ function startScreen(store) {
       ctx.fillText(n.emoji || "・", n.x, n.y + R * 0.06);
     }
     ctx.globalAlpha = 1;
+
+    // 埋め込み：自分の丸に明るい細いリングと「あなた」。ラベルはこの文字にも重ねない
+    const me = embed ? byId.get(embed.myId) : null;
+    const yfs = Math.max(11, Math.round(R * 0.36));
+    if (me) {
+      ctx.strokeStyle = "rgba(255, 246, 230, 0.95)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(me.x, me.y, R + 5, 0, Math.PI * 2); ctx.stroke();
+      const yy = me.y + R + 7 + yfs * 0.6;
+      fixed.push({ left: me.x - yfs * 1.8, right: me.x + yfs * 1.8, top: yy - yfs * 0.7, bottom: yy + yfs * 0.7 });
+    }
 
     // ラベル：2人以上のグループだけ。塊の上か下に寄り添わせ、丸・他のラベル・画面の固定物と重ねない
     const fs = Math.round(R * 0.6);
@@ -745,10 +810,25 @@ function startScreen(store) {
       ctx.fillText(text, g.lx, g.ly);
     }
     ctx.globalAlpha = 1;
-  }
-  requestAnimationFrame(draw);
 
-  setupDemo(demo, applyPeople, () => [...remote, ...demo.values()].map(p => p.emoji));
+    if (me) {
+      ctx.font = `500 ${yfs}px ${sansFont}`;
+      const yy = me.y + R + 7 + yfs * 0.6;
+      ctx.lineWidth = 4; ctx.strokeStyle = "rgba(18, 10, 13, 0.85)";
+      ctx.strokeText("あなた", me.x, yy);
+      ctx.fillStyle = "#efe6d2";
+      ctx.fillText("あなた", me.x, yy);
+    }
+  }
+  if (running) raf = requestAnimationFrame(draw);
+
+  if (!embed) setupDemo(demo, applyPeople, () => [...remote, ...demo.values()].map(p => p.emoji));
+
+  return {
+    onPeople,
+    show() { if (running) return; running = true; resize(); raf = requestAnimationFrame(draw); },
+    hide() { running = false; cancelAnimationFrame(raf); },
+  };
 }
 
 function hexA(hex, a) {
