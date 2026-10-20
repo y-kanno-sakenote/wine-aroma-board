@@ -383,6 +383,9 @@ function stepLayout(nodes, sim, opt) {
     }
   }
 }
+/* DB への保存形式：言葉は改行区切りの1本の文字列（ルールで長さを制限できるように。子の数はルールで数えられないため） */
+function encodeWords(words) { return (words || []).join("\n"); }
+function decodeWords(s) { return typeof s === "string" && s ? s.split("\n").filter(Boolean) : []; }
 /* ==PURE-END== */
 
 /* 受け取った言葉の掃除：定義にない語・重複を捨て、上限で切る（DBに変な値が入っても画面を守る） */
@@ -465,15 +468,14 @@ class FirebaseStore {
     const now = Date.now() + this.offset, out = [];
     for (const [id, rec] of Object.entries(this.last || {})) {
       if (!rec || typeof rec !== "object" || now - (rec.t || 0) > STALE_MS) continue;
-      out.push({ id, emoji: String(rec.emoji || "・").slice(0, 8), words: cleanWords(Object.keys(rec.words || {})), t: rec.t });
+      out.push({ id, emoji: String(rec.emoji || "・").slice(0, 8), words: cleanWords(typeof rec.w === "string" ? decodeWords(rec.w) : Object.keys(rec.words || {})), t: rec.t });
     }
     return out.sort((a, b) => (a.id < b.id ? -1 : 1));
   }
   _emit() { if (this.last == null) return; const people = this._list(); for (const cb of this.listeners) cb(people); }
-  _wordsObj(words) { const o = {}; for (const w of cleanWords(words)) o[w] = true; return Object.keys(o).length ? o : null; }
   async _writeMe() {
     const node = this.ref.child(this.me.id);
-    await node.set({ emoji: this.me.emoji, words: this._wordsObj(this.me.words), t: firebase.database.ServerValue.TIMESTAMP });
+    await node.set({ emoji: this.me.emoji, w: encodeWords(cleanWords(this.me.words)), t: firebase.database.ServerValue.TIMESTAMP });
   }
   async join() {
     const id = this.uid;
@@ -484,14 +486,14 @@ class FirebaseStore {
     try { emoji = emoji || sessionStorage.getItem(emojiKey); } catch {}
     emoji = emoji || pickEmoji(Object.values(all).map(r => r && r.emoji));
     try { sessionStorage.setItem(emojiKey, emoji); } catch {}
-    this.me = { id, emoji, words: Object.keys(all[id]?.words || {}) };
+    this.me = { id, emoji, words: cleanWords(typeof all[id]?.w === "string" ? decodeWords(all[id].w) : Object.keys(all[id]?.words || {})) };
     await this._writeMe();
     return id;
   }
   async setWords(id, words) {
     if (!this.me || id !== this.me.id) return;
     this.me.words = cleanWords(words);
-    await this.ref.child(id).update({ words: this._wordsObj(this.me.words), t: firebase.database.ServerValue.TIMESTAMP });
+    await this.ref.child(id).update({ w: encodeWords(this.me.words), t: firebase.database.ServerValue.TIMESTAMP });
   }
   subscribe(cb) { this.listeners.add(cb); if (this.last != null) cb(this._list()); return () => this.listeners.delete(cb); }
   async leave(id) { if (this.me && id === this.me.id) { this.me = null; await this.ref.child(id).remove(); } }
