@@ -148,6 +148,7 @@
   .mk-card select { min-height: 44px; padding: 0 10px; }
   .mk-card textarea { margin-top: 10px; padding: 8px 10px; line-height: 1.5; resize: vertical; }
   .mk-count { margin: 6px 0 0; font-size: 13px; color: var(--ink-faint); }
+  .mk-card .mk-sec { margin: 10px 4px 0; min-height: 36px; padding: 6px 18px; font-size: 14px; letter-spacing: .08em; color: var(--ink-dim); background: transparent; border: 1px solid var(--line); }
 </style>
 </head>
 <body>
@@ -202,6 +203,8 @@
     <select id="makeSet"></select>
     <textarea id="makeWords" rows="7" placeholder="1行に1語" hidden></textarea>
     <p class="mk-count" id="makeCount" hidden></p>
+    <button type="button" class="mk-sec" id="makeSave" hidden>保存</button>
+    <button type="button" class="mk-sec" id="makeDel" hidden>削除</button>
     <button type="submit">始める</button>
   </div>
 </form>
@@ -987,28 +990,68 @@ function setupQrTab(joinUrl) {
 function startMake() {
   const form = document.getElementById("make");
   const input = document.getElementById("makeName");
-  const go = form.querySelector("button");
+  const go = form.querySelector("button[type=submit]");
   const sel = document.getElementById("makeSet");
   const area = document.getElementById("makeWords");
   const count = document.getElementById("makeCount");
-  for (const [k, v] of Object.entries(SETS)) sel.add(new Option(v.name || k, k));
-  sel.add(new Option("オリジナル（言葉を打つ）", ""));
-  sel.value = CUSTOM ? "" : SET_KEY;
+  const saveBtn = document.getElementById("makeSave");
+  const delBtn = document.getElementById("makeDel");
+  // 保存したオリジナル：この端末のブラウザにだけ置く（別のPC・閲覧データ削除では消える）。値は "my:名前"
+  const MY_KEY = "aroma-board:mysets";
+  const loadMine = () => { try { const a = JSON.parse(localStorage.getItem(MY_KEY) || "[]"); return Array.isArray(a) ? a.filter(x => x && x.name && Array.isArray(x.words)) : []; } catch { return []; } };
+  const storeMine = a => { try { localStorage.setItem(MY_KEY, JSON.stringify(a)); return true; } catch { return false; } };
+  const fillOptions = value => {
+    sel.length = 0;
+    for (const [k, v] of Object.entries(SETS)) sel.add(new Option(v.name || k, k));
+    for (const m of loadMine()) sel.add(new Option(m.name, "my:" + m.name));
+    sel.add(new Option("オリジナル（言葉を打つ）", ""));
+    sel.value = value;
+    if (sel.value !== value) sel.value = "";
+  };
+  fillOptions(CUSTOM ? "" : SET_KEY);
   if (CUSTOM) area.value = CUSTOM.join("\n");
   const d = new Date();
   input.value = String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
   const tidy = () => {
     const v = input.value.replace(/[^A-Za-z0-9-]/g, "").slice(0, 24);
     if (v !== input.value) input.value = v;
-    const custom = sel.value === "";
+    const mine = sel.value.startsWith("my:"), custom = sel.value === "" || mine;
+    const saved = mine ? loadMine().find(x => "my:" + x.name === sel.value) : null;
+    const edited = !saved || saved.words.join("\n") !== parseWords(area.value).join("\n");
     area.hidden = count.hidden = !custom;
+    saveBtn.hidden = !custom || !edited;   // 保存済みは打ち直したときだけ「保存」、そのままなら「削除」だけ
+    delBtn.hidden = !mine || edited;
     const words = parseWords(area.value), n = words.length;
     const long = encodeCustom(words).length > CUSTOM_LEN;
     count.textContent = long ? `${n}語（長すぎてQRに入りません。語か字を減らしてください）`
       : n < CUSTOM_MIN ? `${n}語（${CUSTOM_MIN}語から始められます）` : `${n}語（20語前後がちょうどよい）`;
     go.disabled = !v || (custom && (n < CUSTOM_MIN || long));
+    saveBtn.disabled = n < CUSTOM_MIN;
   };
-  sel.addEventListener("change", tidy);
+  sel.addEventListener("change", () => {
+    const m = loadMine().find(x => "my:" + x.name === sel.value);
+    if (m) area.value = m.words.join("\n");
+    tidy();
+  });
+  saveBtn.addEventListener("click", () => {
+    const words = parseWords(area.value);
+    if (words.length < CUSTOM_MIN) return;
+    const cur = sel.value.startsWith("my:") ? sel.value.slice(3) : "";
+    const name = (prompt("名前（この端末に保存・同じ名前は上書き）", cur) || "").trim().slice(0, 20);
+    if (!name) return;
+    const list = loadMine().filter(x => x.name !== name);
+    list.push({ name, words });
+    if (!storeMine(list)) { alert("このブラウザでは保存できませんでした"); return; }
+    fillOptions("my:" + name);
+    tidy();
+  });
+  delBtn.addEventListener("click", () => {
+    const name = sel.value.slice(3);
+    if (!confirm(`「${name}」を削除しますか？`)) return;
+    storeMine(loadMine().filter(x => x.name !== name));
+    fillOptions("");
+    tidy();
+  });
   area.addEventListener("input", tidy);
   input.addEventListener("input", e => { if (!e.isComposing) tidy(); });
   input.addEventListener("compositionend", tidy);
@@ -1017,7 +1060,7 @@ function startMake() {
     tidy();
     if (go.disabled) return;
     const q = new URLSearchParams();
-    if (sel.value) q.set("set", sel.value);
+    if (sel.value && !sel.value.startsWith("my:")) q.set("set", sel.value);
     else q.set("w", encodeCustom(parseWords(area.value)));
     q.set("b", input.value);
     location.assign(location.pathname + "?" + q.toString() + "#screen");
