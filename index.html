@@ -143,6 +143,11 @@
   .mk-card input:focus { border-bottom-color: var(--chip-on-line); }
   .mk-card button { margin-top: 22px; min-height: 44px; padding: 10px 30px; font: inherit; font-size: 16px; letter-spacing: .14em; color: #fff6e6; background: var(--chip-on); border: 1px solid var(--chip-on-line); border-radius: 999px; cursor: pointer; }
   .mk-card button:disabled { opacity: .4; cursor: default; }
+  .mk-card .mk-sub { margin: 22px 0 10px; }
+  .mk-card select, .mk-card textarea { width: 100%; font: inherit; font-size: 16px; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 8px; }
+  .mk-card select { min-height: 44px; padding: 0 10px; }
+  .mk-card textarea { margin-top: 10px; padding: 8px 10px; line-height: 1.5; resize: vertical; }
+  .mk-count { margin: 6px 0 0; font-size: 13px; color: var(--ink-faint); }
 </style>
 </head>
 <body>
@@ -193,6 +198,10 @@
   <div class="mk-card">
     <label for="makeName">ボードの名前</label>
     <input id="makeName" maxlength="24" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <label for="makeSet" class="mk-sub">言葉</label>
+    <select id="makeSet"></select>
+    <textarea id="makeWords" rows="7" placeholder="1行に1語" hidden></textarea>
+    <p class="mk-count" id="makeCount" hidden></p>
     <button type="submit">始める</button>
   </div>
 </form>
@@ -226,7 +235,28 @@ const DEFAULT_AVATARS = ["🍇", "🍒", "🍓", "🫐", "🍋", "🍏", "🍐",
 const QS = new URLSearchParams(location.search);
 const SETS = window.BOARD_SETS || {};
 const SET_KEY = SETS[QS.get("set")] ? QS.get("set") : (SETS.wine ? "wine" : Object.keys(SETS)[0]);
-const SET = SETS[SET_KEY] || { title: "", prompt: "", groups: [] };
+
+/* オリジナル：講師がボード作成時に打った言葉を ?w= に入れて配る（DBには置かない）。UTF-8 を base64url にして URL・QR を短く保つ */
+const CUSTOM_MIN = 10, CUSTOM_MAX = 40;
+const CUSTOM_LEN = 532;   // ?w= の長さの上限。1280×720 投影の大QRはURL全体620字まで読めた（2026-11-03 qa 実測）。ボード名24字を見込んで532
+function parseWords(text) {
+  return [...new Set(String(text).split(/[\n,、，]+/).map(w => [...w.trim()].slice(0, 30).join("")).filter(Boolean))].slice(0, CUSTOM_MAX);
+}
+function encodeCustom(words) {
+  const bin = String.fromCharCode(...new TextEncoder().encode(words.join("\n")));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decodeCustom(s) {
+  try {
+    const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+    const words = parseWords(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+    return words.length >= CUSTOM_MIN && s.length <= CUSTOM_LEN ? words : null;
+  } catch { return null; }
+}
+const CUSTOM = QS.has("w") ? decodeCustom(QS.get("w")) : null;
+const SET = CUSTOM
+  ? { title: "みんなの言葉ボード", prompt: "ピンときた言葉を5つタップ", groups: [{ label: "", words: CUSTOM }] }
+  : (SETS[SET_KEY] || { title: "", prompt: "", groups: [] });
 const WORD_GROUPS = SET.groups || [];
 const ALL_WORDS = [...new Set(WORD_GROUPS.flatMap(g => g.words))];
 const AVATARS = (SET.avatars && SET.avatars.length) ? SET.avatars : DEFAULT_AVATARS;
@@ -307,6 +337,19 @@ function nearestPeople(meId, people, threshold = GROUP_THRESHOLD, max = 5) {
     .sort((a, b) => b.s - a.s)
     .slice(0, max)
     .map(x => x.p);
+}
+
+/* 基準に届く人がいないときの「いちばん近い人」（1語でも重なる人のうち最も近い1人。無ければ null） */
+function closestPerson(meId, people) {
+  const me = people.find(p => p.id === meId);
+  if (!me || !me.words || me.words.length === 0) return null;
+  let best = null, bs = 0;
+  for (const p of people) {
+    if (p.id === meId) continue;
+    const s = jaccard(me.words, p.words || []);
+    if (s > bs) { best = p; bs = s; }
+  }
+  return best;
 }
 
 /* 力学シミュレーション1ステップ（nodes を書き換える）
@@ -549,9 +592,9 @@ async function startPhone(store) {
   for (const c of WORD_GROUPS) {
     const sec = document.createElement("section");
     sec.className = "cat";
-    const h = document.createElement("h2"); h.textContent = c.label;
     const box = document.createElement("div"); box.className = "chips";
-    sec.append(h, box);
+    if (c.label) { const h = document.createElement("h2"); h.textContent = c.label; sec.append(h); }
+    sec.append(box);
     for (const w of c.words) {
       const b = document.createElement("button");
       b.type = "button"; b.className = "chip"; b.textContent = w;
@@ -612,7 +655,9 @@ async function startPhone(store) {
     }
     if (myWords.size === 0) { nearEl.textContent = "言葉を選ぶと、近い人が見えます"; return; }
     const self = { id: myId, words: [...myWords] };
-    const near = nearestPeople(myId, [self, ...people.filter(p => p.id !== myId)]);
+    const all = [self, ...people.filter(p => p.id !== myId)];
+    let near = nearestPeople(myId, all);
+    if (!near.length) { const c = closestPerson(myId, all); near = c ? [c] : []; }   // 基準に届かなくても1語重なる人を1人（ひとりぼっちにしない）
     nearEl.textContent = "";
     nearEl.append(near.length ? "近い人" : "近い人は、まだ");
     for (const p of near) {
@@ -640,12 +685,13 @@ function startScreen(store, embed = null) {
     // 参加用URL：同じ set と b を引き継ぐ（URLにあるものだけ。短く保つ）
     const u = new URL(location.href);
     const q = new URLSearchParams();
-    if (QS.has("set")) q.set("set", SET_KEY);
+    if (CUSTOM) q.set("w", QS.get("w"));
+    else if (QS.has("set")) q.set("set", SET_KEY);
     if (QS.has("b")) q.set("b", BOARD_ID);
     u.search = q.toString() ? "?" + q.toString() : "";
     u.hash = "phone";
     const joinUrl = u.toString();
-    const shortUrl = joinUrl.replace(/^https?:\/\//, "");
+    const shortUrl = CUSTOM ? "" : joinUrl.replace(/^https?:\/\//, "");   // オリジナルはURLが長いので文字では出さない（QRとコピーで配る）
     document.getElementById("joinUrl").textContent = shortUrl;
     document.getElementById("qrUrl").textContent = shortUrl;
     setupQrTab(joinUrl);
@@ -942,24 +988,41 @@ function startMake() {
   const form = document.getElementById("make");
   const input = document.getElementById("makeName");
   const go = form.querySelector("button");
+  const sel = document.getElementById("makeSet");
+  const area = document.getElementById("makeWords");
+  const count = document.getElementById("makeCount");
+  for (const [k, v] of Object.entries(SETS)) sel.add(new Option(v.name || k, k));
+  sel.add(new Option("オリジナル（言葉を打つ）", ""));
+  sel.value = CUSTOM ? "" : SET_KEY;
+  if (CUSTOM) area.value = CUSTOM.join("\n");
   const d = new Date();
   input.value = String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
   const tidy = () => {
     const v = input.value.replace(/[^A-Za-z0-9-]/g, "").slice(0, 24);
     if (v !== input.value) input.value = v;
-    go.disabled = !v;
+    const custom = sel.value === "";
+    area.hidden = count.hidden = !custom;
+    const words = parseWords(area.value), n = words.length;
+    const long = encodeCustom(words).length > CUSTOM_LEN;
+    count.textContent = long ? `${n}語（長すぎてQRに入りません。語か字を減らしてください）`
+      : n < CUSTOM_MIN ? `${n}語（${CUSTOM_MIN}語から始められます）` : `${n}語（20語前後がちょうどよい）`;
+    go.disabled = !v || (custom && (n < CUSTOM_MIN || long));
   };
+  sel.addEventListener("change", tidy);
+  area.addEventListener("input", tidy);
   input.addEventListener("input", e => { if (!e.isComposing) tidy(); });
   input.addEventListener("compositionend", tidy);
   form.addEventListener("submit", e => {
     e.preventDefault();
     tidy();
-    if (!input.value) return;
+    if (go.disabled) return;
     const q = new URLSearchParams();
-    if (QS.has("set")) q.set("set", QS.get("set"));
+    if (sel.value) q.set("set", sel.value);
+    else q.set("w", encodeCustom(parseWords(area.value)));
     q.set("b", input.value);
     location.assign(location.pathname + "?" + q.toString() + "#screen");
   });
+  tidy();
   form.hidden = false;
   input.focus();
   input.select();
