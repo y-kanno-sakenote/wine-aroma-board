@@ -82,6 +82,7 @@
     transition: background-color .15s, border-color .15s;
   }
   .chip:hover { border-color: var(--ink-faint); }
+  .chip[aria-disabled="true"] { opacity: .35; cursor: default; }
   .chip[aria-pressed="true"] { background: var(--chip-on); border-color: var(--chip-on-line); color: #fff6e6; }
   .chip:focus-visible { outline: 2px solid var(--ink-dim); outline-offset: 2px; }
   .ph-near {
@@ -228,7 +229,7 @@ const SET = SETS[SET_KEY] || { title: "", prompt: "", groups: [] };
 const WORD_GROUPS = SET.groups || [];
 const ALL_WORDS = [...new Set(WORD_GROUPS.flatMap(g => g.words))];
 const AVATARS = (SET.avatars && SET.avatars.length) ? SET.avatars : DEFAULT_AVATARS;
-const MAX_WORDS = 20;              // 1人が持てる言葉の上限（database.rules.json の想定と合わせる）
+const MAX_WORDS = 5;               // 1人が選べる言葉の数（案内の「5つ」と同じ。グループのまとまり方はこの数を前提に試算した）
 
 const STALE_MS = 6 * 60 * 60 * 1000;   // ボードは1回の講座ごとに分ける前提。6時間更新がなければ表示から外す（前回の講座の残りを拾わないため）
 const HEARTBEAT_MS = 60 * 1000;    // 参加者画面を開いている間の生存通知
@@ -239,7 +240,7 @@ const BOARD_ID = (() => {
 })();
 
 /* ==PURE-BEGIN== 類似度・グループ検出・配置計算（DOMに触らない純関数。grouping.test.mjs が読む） */
-const GROUP_THRESHOLD = 0.25;      // この Jaccard 以上の2人を「近い」とみなす（10名規模向け。5語どうしで2語共有＝0.25）
+const GROUP_THRESHOLD = 0.4;       // この Jaccard 以上の2人を「近い」とみなす（5語どうしで3語共有＝約0.43。2語共有＝0.25 だと20語では全員ひと塊になる）
 
 function jaccard(a, b) {
   const A = a instanceof Set ? a : new Set(a);
@@ -557,7 +558,8 @@ async function startPhone(store) {
       b.addEventListener("click", () => {
         if (myWords.has(w)) myWords.delete(w);
         else if (myWords.size < MAX_WORDS) myWords.add(w);
-        b.setAttribute("aria-pressed", String(myWords.has(w)));
+        else return;
+        syncChips();
         save();
         store.setWords(myId, [...myWords]);
       });
@@ -566,6 +568,15 @@ async function startPhone(store) {
     }
     cats.appendChild(sec);
   }
+  // 5つ選んだら残りを薄くする（外せば、また選べる）
+  function syncChips() {
+    const full = myWords.size >= MAX_WORDS;
+    for (const [w, b] of chipEls) {
+      b.setAttribute("aria-pressed", String(myWords.has(w)));
+      b.setAttribute("aria-disabled", String(full && !myWords.has(w)));
+    }
+  }
+  syncChips();
 
   // 「ボード」タブ：スクリーンと同じ描画を埋め込みで使う（購読は下の1つを分けて渡す）
   const board = startScreen(store, { canvas: document.getElementById("phBoard"), myId });
@@ -594,7 +605,7 @@ async function startPhone(store) {
       if (!restored) { // 同じタブで別経路から入っていた言葉を戻す
         restored = true;
         myWords = new Set(me.words);
-        for (const [w, b] of chipEls) b.setAttribute("aria-pressed", String(myWords.has(w)));
+        syncChips();
         save();
       }
     }
@@ -673,11 +684,10 @@ function startScreen(store, embed = null) {
 
   // 「近さのものさし」：講師がキーで切り替える（↓ / - でゆるめる、↑ / + できびしく）。スクリーンの表示だけに効く
   const RULERS = [
-    { v: 0.34, label: "きびしめ" },
-    { v: GROUP_THRESHOLD, label: "ふつう" },
-    { v: 0.20, label: "ゆるめ" },
-    { v: 0.15, label: "かなりゆるめ" },
-    { v: 0.10, label: "とてもゆるい" },
+    { v: 0.6, label: "きびしめ" },         // 5語どうしで4語共有
+    { v: GROUP_THRESHOLD, label: "ふつう" }, // 3語共有
+    { v: 0.25, label: "ゆるめ" },          // 2語共有
+    { v: 0.10, label: "とてもゆるい" },     // 1語共有
   ];
   let rulerIdx = 1;
   let threshold = RULERS[rulerIdx].v;
@@ -993,7 +1003,7 @@ function setupDemo(demo, onChange, usedEmojis) {
         pending = pending.filter(x => x !== tm);
         const id = `demo-${++seq}`;
         demo.set(id, { id, emoji: pickEmoji(usedEmojis()), words: [] });
-        state.set(id, { tend: TENDS[Math.floor(Math.random() * TENDS.length)], target: 3 + Math.floor(Math.random() * 4) });
+        state.set(id, { tend: TENDS[Math.floor(Math.random() * TENDS.length)], target: MAX_WORDS });
         onChange();
       }, i * 1200);
       pending.push(tm);
