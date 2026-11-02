@@ -197,7 +197,8 @@
   </div>
 </form>
 
-<script src="sets.js"></script>
+<script>/* sets.js は毎回読み直す（Pages は10分キャッシュするので、言葉を直しても古いまま届く。index.html は触らずに済むよう番号は自動） */
+document.write('<script src="sets.js?t=' + Date.now() + '"><\/script>');</script>
 <script>
 "use strict";
 
